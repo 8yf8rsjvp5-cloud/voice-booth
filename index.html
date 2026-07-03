@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Смена голоса — Voice Booth</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#12161b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Voice Booth">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+  :root{
+    --bg: #12161b;
+    --panel: #1b2129;
+    --panel-raised: #232b34;
+    --copper: #c98a4b;
+    --copper-bright: #e0a868;
+    --teal: #5fb8a8;
+    --text: #eae6df;
+    --text-muted: #8b93a1;
+    --line: #2b3340;
+    --danger: #c65c4a;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(ellipse at top, #1a2028 0%, var(--bg) 60%);
+    color:var(--text);
+    font-family:'Inter',sans-serif;
+    min-height:100vh;
+    padding:32px 20px 60px;
+  }
+
+  .wrap{max-width:880px;margin:0 auto;}
+
+  header{margin-bottom:28px;}
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--teal);
+    margin-bottom:10px;
+  }
+  h1{
+    font-family:'Space Grotesk',sans-serif;
+    font-size:clamp(28px,5vw,42px);
+    font-weight:700;
+    margin:0 0 8px;
+    letter-spacing:-0.01em;
+  }
+  .sub{color:var(--text-muted);font-size:14.5px;line-height:1.55;max-width:560px;}
+
+  /* ===== Scope / signature element ===== */
+  .scope{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:18px 20px;
+    margin:28px 0 22px;
+    position:relative;
+    overflow:hidden;
+  }
+  .scope-top{
+    display:flex;justify-content:space-between;align-items:center;
+    margin-bottom:10px;
+  }
+  .scope-label{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;color:var(--text-muted);letter-spacing:.08em;
+  }
+  .status-dot{
+    display:inline-block;width:7px;height:7px;border-radius:50%;
+    background:var(--text-muted); margin-right:6px; vertical-align:middle;
+  }
+  .status-dot.live{background:var(--teal); box-shadow:0 0 8px var(--teal);}
+  canvas#scope{
+    width:100%; height:120px; display:block; border-radius:8px;
+    background:#0d1116;
+  }
+
+  /* ===== Mic control ===== */
+  .mic-row{
+    display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+    margin-top:16px;
+  }
+  button{
+    font-family:'Inter',sans-serif;
+    cursor:pointer; border:none; border-radius:9px;
+    font-weight:600; font-size:14px;
+    padding:12px 20px;
+    transition:transform .12s ease, background .15s ease;
+  }
+  button:active{transform:scale(0.97);}
+  #micBtn{
+    background:var(--copper); color:#191410;
+    display:flex; align-items:center; gap:8px;
+  }
+  #micBtn:hover{background:var(--copper-bright);}
+  #micBtn.recording{background:var(--danger); color:#1a0f0d;}
+  .monitor-toggle{
+    display:flex;align-items:center;gap:8px;
+    font-size:13px;color:var(--text-muted);
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .monitor-toggle input{accent-color:var(--teal); width:15px;height:15px;}
+
+  .warn{
+    font-size:12.5px; color:var(--text-muted); margin-top:10px;
+    border-left:2px solid var(--copper); padding-left:10px; line-height:1.5;
+  }
+
+  .banner{
+    background:#2a2016; border:1px solid var(--copper);
+    color:var(--copper-bright); font-size:13px; line-height:1.55;
+    border-radius:10px; padding:12px 14px; margin-bottom:18px;
+  }
+  .banner a{color:var(--copper-bright); text-decoration:underline;}
+
+  #recBtn{background:var(--panel-raised); color:var(--text); border:1px solid var(--line);}
+  #recBtn:disabled{opacity:.4; cursor:not-allowed;}
+  #recBtn.recording{background:var(--danger); color:#1a0f0d; border-color:var(--danger);}
+  #recResult{margin-top:12px;}
+  #recResult audio{width:100%; margin-bottom:8px;}
+  #recResult a{
+    display:inline-block; font-family:'IBM Plex Mono',monospace; font-size:12.5px;
+    color:var(--teal); text-decoration:none; border:1px solid var(--teal);
+    border-radius:7px; padding:7px 12px;
+  }
+
+  /* ===== Preset strip (channel strips) ===== */
+  .strips{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:12px;
+    margin-bottom:22px;
+  }
+  @media (max-width:640px){ .strips{grid-template-columns:repeat(2,1fr);} }
+
+  .strip{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:16px 14px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s ease, background .15s ease;
+    position:relative;
+  }
+  .strip:hover{border-color:var(--copper);}
+  .strip.active{
+    border-color:var(--teal);
+    background:var(--panel-raised);
+    box-shadow:0 0 0 1px var(--teal) inset;
+  }
+  .strip .num{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:10px; color:var(--text-muted); letter-spacing:.1em;
+    display:block; margin-bottom:8px;
+  }
+  .strip .name{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:700; font-size:15px; margin-bottom:4px;
+  }
+  .strip .desc{font-size:11.5px;color:var(--text-muted); line-height:1.4;}
+  .strip.active .num{color:var(--teal);}
+
+  /* ===== Fader ===== */
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:20px 22px;
+    margin-bottom:22px;
+  }
+  .panel h3{
+    font-family:'Space Grotesk',sans-serif;
+    font-size:15px; margin:0 0 4px;
+  }
+  .panel .hint{font-size:12.5px;color:var(--text-muted); margin-bottom:14px;}
+  .fader-row{display:flex; align-items:center; gap:14px;}
+  input[type=range]{
+    flex:1; -webkit-appearance:none; appearance:none;
+    height:4px; border-radius:2px; background:var(--line); outline:none;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:16px;height:16px;border-radius:50%;
+    background:var(--copper-bright); cursor:pointer; border:2px solid #1a1410;
+  }
+  .fader-val{
+    font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--teal);
+    min-width:64px; text-align:right;
+  }
+
+  /* ===== Routing instructions ===== */
+  .steps{list-style:none; margin:0; padding:0; counter-reset:step;}
+  .steps li{
+    counter-increment:step;
+    position:relative; padding:10px 0 10px 34px;
+    border-bottom:1px solid var(--line);
+    font-size:13.5px; color:var(--text-muted); line-height:1.55;
+  }
+  .steps li:last-child{border-bottom:none;}
+  .steps li::before{
+    content:counter(step);
+    position:absolute; left:0; top:9px;
+    width:20px;height:20px;border-radius:5px;
+    background:var(--panel-raised); border:1px solid var(--line);
+    color:var(--copper); font-family:'IBM Plex Mono',monospace;
+    font-size:11px; display:flex;align-items:center;justify-content:center;
+  }
+  .steps strong{color:var(--text); font-weight:600;}
+  a{color:var(--teal);}
+
+  footer{margin-top:26px; font-size:12px; color:var(--text-muted); text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Live voice booth · обработка звука в реальном времени</div>
+    <h1>Меняй голос вживую</h1>
+    <p class="sub">Говори в микрофон — приложение меняет тембр на лету. Три пресета: мужской, женский, анонимный, плюс ручная подстройка тона.</p>
+  </header>
+
+  <div class="banner" id="secureWarning" style="display:none;"></div>
+
+  <div class="scope">
+    <div class="scope-top">
+      <span class="scope-label"><span class="status-dot" id="statusDot"></span><span id="statusText">микрофон выключен</span></span>
+      <span class="scope-label" id="pitchReadout">TONE 0.0 ST</span>
+    </div>
+    <canvas id="scope"></canvas>
+
+    <div class="mic-row">
+      <button id="micBtn">🎙 Включить микрофон</button>
+      <button id="recBtn" disabled>⏺ Записать сообщение</button>
+      <label class="monitor-toggle">
+        <input type="checkbox" id="monitorToggle">
+        слышать себя в наушниках (осторожно: без наушников — эхо)
+      </label>
+    </div>
+    <div id="recResult"></div>
+    <div class="warn">Работает прямо в браузере — установка не нужна. Разреши доступ к микрофону, когда браузер спросит.</div>
+  </div>
+
+  <div class="strips" id="strips">
+    <div class="strip active" data-preset="original">
+      <span class="num">CH.0</span>
+      <div class="name">Свой</div>
+      <div class="desc">без изменений</div>
+    </div>
+    <div class="strip" data-preset="male">
+      <span class="num">CH.1</span>
+      <div class="name">Мужской</div>
+      <div class="desc">ниже и плотнее</div>
+    </div>
+    <div class="strip" data-preset="female">
+      <span class="num">CH.2</span>
+      <div class="name">Женский</div>
+      <div class="desc">выше и легче</div>
+    </div>
+    <div class="strip" data-preset="anon">
+      <span class="num">CH.3</span>
+      <div class="name">Анонимный</div>
+      <div class="desc">приглушённый, с эффектом</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Точная настройка тона</h3>
+    <div class="hint">Двигай, если пресет нужно чуть подкрутить под себя (в полутонах).</div>
+    <div class="fader-row">
+      <input type="range" id="fineTune" min="-12" max="12" step="0.5" value="0">
+      <span class="fader-val" id="fineTuneVal">0.0</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>💻 Компьютер: живой голос в звонках (Zoom, Discord, WhatsApp Web и т.п.)</h3>
+    <div class="hint">Браузер не может напрямую подменить микрофон в другой программе — нужен виртуальный аудио-кабель. Так же устроен, например, Voicemod.</div>
+    <ul class="steps">
+      <li>Установи <strong>VB-Audio Virtual Cable</strong> (Windows, бесплатно) или <strong>BlackHole</strong> (Mac, бесплатно).</li>
+      <li>На этой странице включи микрофон и выбери пресет.</li>
+      <li>В настройках системы выбери <strong>вывод звука страницы</strong> = виртуальный кабель.</li>
+      <li>В приложении для звонков выбери <strong>виртуальный кабель как вход (микрофон)</strong>.</li>
+      <li>Собеседник услышит уже обработанный голос.</li>
+    </ul>
+  </div>
+
+  <div class="panel">
+    <h3>📱 Телефон: честно про ограничения</h3>
+    <div class="hint">
+      Страница откроется и заработает в мобильном браузере (Chrome на Android, Safari на iPhone) — но с двумя важными оговорками:
+    </div>
+    <ul class="steps">
+      <li><strong>Доступ к микрофону.</strong> Если открыть файл прямо с телефона (например, из «Файлов» или «Загрузок»), браузер может не дать доступ к микрофону — особенно на iPhone. Нужен обычный https-адрес: закинь файл на бесплатный хостинг вроде <strong>GitHub Pages</strong> или <strong>Netlify Drop</strong> (перетащить файл на netlify.com/drop — займёт минуту) и открой готовую ссылку в мобильном браузере.</li>
+      <li><strong>Живая подмена голоса во время настоящего звонка (обычный вызов, WhatsApp-звонок, Telegram-звонок) на телефоне технически невозможна без root/jailbreak.</strong> В отличие от компьютера, ни Android, ни iOS не позволяют сайту или обычному приложению встроить «виртуальный микрофон» в системный звонок — это заблокировано на уровне ОС в целях безопасности. Программы, которые обещают это в сторах, либо требуют root/джейлбрейк, либо работают только внутри своего собственного звонка (не в WhatsApp/Telegram), либо это разводка.</li>
+      <li><strong>Что реально работает на телефоне:</strong> кнопка «Записать сообщение» выше — запиши фразу голосом с нужным пресетом и отправь получившийся файл как голосовое сообщение в любой мессенджер. Это не живой звонок, но полностью рабочий и честный способ пользоваться сменой голоса с телефона.</li>
+    </ul>
+  </div>
+
+  <footer>Обработка происходит локально в браузере — звук никуда не отправляется.</footer>
+</div>
+
+<script>
+let audioCtx, micStream, sourceNode, scriptNode, formantFilter, monitorGain, analyser, streamDest;
+let currentPreset = 'original';
+let fineTune = 0;
+let isRunning = false;
+
+// pitch-shifter state (shared with the onaudioprocess callback below)
+let ringBuffer, ringLen, writeIndex, readIndex, pitchRatio;
+const GRAIN = 1024;
+
+const PRESETS = {
+  original: { semitones: 0,   filterFreq: null, filterGain: 0, wobble:false },
+  male:     { semitones: -5,  filterFreq: 500,  filterGain: 4, wobble:false },
+  female:   { semitones: 6,   filterFreq: 2500, filterGain: 4, wobble:false },
+  anon:     { semitones: -3,  filterFreq: 1200, filterGain: -6, wobble:true }
+};
+
+function semitonesToRatio(semi){ return Math.pow(2, semi/12); }
+
+(function checkSecureContext(){
+  const isSecure = window.isSecureContext;
+  const isFile = location.protocol === 'file:';
+  if (!isSecure || isFile){
+    const el = document.getElementById('secureWarning');
+    el.style.display = 'block';
+    el.innerHTML = isFile
+      ? '⚠ Файл открыт напрямую с телефона (file://). Мобильные браузеры на iPhone обычно блокируют доступ к микрофону в этом режиме. Залей файл на любой https-хостинг (например GitHub Pages или Netlify Drop) и открой оттуда — тогда доступ к микрофону запросится нормально.'
+      : '⚠ Эта страница открыта не по https. Доступ к микрофону может быть заблокирован браузером телефона.';
+  }
+})();
+
+async function initAudio(){
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+  micStream = await navigator.mediaDevices.getUserMedia({audio:{
+    echoCancellation:true, noiseSuppression:true, autoGainControl:true
+  }});
+
+  sourceNode = audioCtx.createMediaStreamSource(micStream);
+
+  // Pitch shifter implemented with ScriptProcessorNode (no external module
+  // loading required — works reliably from local files and http/https alike).
+  ringLen = 8192;
+  ringBuffer = new Float32Array(ringLen);
+  writeIndex = 0;
+  readIndex = 0;
+  pitchRatio = 1.0;
+
+  scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  scriptNode.onaudioprocess = function(e){
+    const input = e.inputBuffer.getChannelData(0);
+    const output = e.outputBuffer.getChannelData(0);
+    const half = GRAIN / 2;
+    for (let i = 0; i < input.length; i++){
+      ringBuffer[writeIndex] = input[i];
+      writeIndex = (writeIndex + 1) % ringLen;
+
+      const idx1 = readIndex;
+      const idx2 = (readIndex + half) % ringLen;
+      const pos = idx1 % GRAIN;
+      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * pos) / GRAIN);
+      const s1 = ringBuffer[Math.floor(idx1) % ringLen];
+      const s2 = ringBuffer[Math.floor(idx2) % ringLen];
+      output[i] = s1 * w + s2 * (1 - w);
+
+      readIndex += pitchRatio;
+      if (readIndex >= ringLen) readIndex -= ringLen;
+      if (readIndex < 0) readIndex += ringLen;
+    }
+  };
+
+  formantFilter = audioCtx.createBiquadFilter();
+  formantFilter.type = 'peaking';
+  formantFilter.frequency.value = 1000;
+  formantFilter.Q.value = 0.9;
+  formantFilter.gain.value = 0;
+
+  monitorGain = audioCtx.createGain();
+  monitorGain.gain.value = 0; // off by default (avoid feedback)
+
+  streamDest = audioCtx.createMediaStreamDestination();
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024;
+
+  sourceNode.connect(scriptNode);
+  scriptNode.connect(formantFilter);
+  formantFilter.connect(analyser);
+  analyser.connect(monitorGain);
+  monitorGain.connect(audioCtx.destination);
+  analyser.connect(streamDest);
+
+  applyPreset(currentPreset);
+  drawScope();
+  document.getElementById('recBtn').disabled = false;
+}
+
+let mediaRecorder, recordedChunks = [];
+
+function toggleRecording(){
+  const recBtn = document.getElementById('recBtn');
+  if (!mediaRecorder || mediaRecorder.state === 'inactive'){
+    recordedChunks = [];
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    mediaRecorder = mimeType ? new MediaRecorder(streamDest.stream, {mimeType}) : new MediaRecorder(streamDest.stream);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(recordedChunks, {type: mediaRecorder.mimeType || 'audio/webm'});
+      const url = URL.createObjectURL(blob);
+      const box = document.getElementById('recResult');
+      box.innerHTML = '';
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.src = url;
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'голос-' + currentPreset + '.webm';
+      link.textContent = '⬇ Скачать и отправить как голосовое';
+      box.appendChild(audio);
+      box.appendChild(link);
+    };
+    mediaRecorder.start();
+    recBtn.textContent = '⏹ Остановить запись';
+    recBtn.classList.add('recording');
+  } else {
+    mediaRecorder.stop();
+    recBtn.textContent = '⏺ Записать сообщение';
+    recBtn.classList.remove('recording');
+  }
+}
+
+function applyPreset(name){
+  currentPreset = name;
+  const p = PRESETS[name];
+  const totalSemi = p.semitones + fineTune;
+  pitchRatio = semitonesToRatio(totalSemi);
+
+  if (formantFilter){
+    if (p.filterFreq){
+      formantFilter.frequency.setTargetAtTime(p.filterFreq, audioCtx.currentTime, 0.05);
+      formantFilter.gain.setTargetAtTime(p.filterGain, audioCtx.currentTime, 0.05);
+    } else {
+      formantFilter.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+    }
+  }
+
+  document.querySelectorAll('.strip').forEach(s=>{
+    s.classList.toggle('active', s.dataset.preset === name);
+  });
+  document.getElementById('pitchReadout').textContent =
+    'TONE ' + (totalSemi>=0?'+':'') + totalSemi.toFixed(1) + ' ST';
+}
+
+function drawScope(){
+  const canvas = document.getElementById('scope');
+  const ctx = canvas.getContext('2d');
+  function resize(){
+    canvas.width = canvas.clientWidth * devicePixelRatio;
+    canvas.height = canvas.clientHeight * devicePixelRatio;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const bufferLength = analyser ? analyser.fftSize : 1024;
+  const dataArray = new Uint8Array(bufferLength);
+
+  function loop(){
+    requestAnimationFrame(loop);
+    ctx.fillStyle = '#0d1116';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    if (!analyser || !isRunning){
+      ctx.strokeStyle = '#2b3340';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height/2);
+      ctx.lineTo(canvas.width, canvas.height/2);
+      ctx.stroke();
+      return;
+    }
+    analyser.getByteTimeDomainData(dataArray);
+    ctx.lineWidth = 2 * devicePixelRatio;
+    ctx.strokeStyle = '#5fb8a8';
+    ctx.beginPath();
+    const sliceWidth = canvas.width / bufferLength;
+    let x = 0;
+    for (let i=0;i<bufferLength;i++){
+      const v = dataArray[i]/128.0;
+      const y = v * canvas.height/2;
+      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      x += sliceWidth;
+    }
+    ctx.stroke();
+  }
+  loop();
+}
+
+document.getElementById('micBtn').addEventListener('click', async ()=>{
+  const btn = document.getElementById('micBtn');
+  if (!isRunning){
+    try{
+      btn.textContent = '⏳ запрашиваю доступ...';
+      await initAudio();
+      isRunning = true;
+      btn.textContent = '⏹ Выключить микрофон';
+      btn.classList.add('recording');
+      document.getElementById('statusDot').classList.add('live');
+      document.getElementById('statusText').textContent = 'микрофон активен';
+    }catch(err){
+      btn.textContent = '🎙 Включить микрофон';
+      alert('Не удалось получить доступ к микрофону: ' + err.message);
+    }
+  } else {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    if (micStream) micStream.getTracks().forEach(t=>t.stop());
+    if (audioCtx) audioCtx.close();
+    isRunning = false;
+    btn.textContent = '🎙 Включить микрофон';
+    btn.classList.remove('recording');
+    document.getElementById('statusDot').classList.remove('live');
+    document.getElementById('statusText').textContent = 'микрофон выключен';
+    document.getElementById('recBtn').disabled = true;
+  }
+});
+
+document.getElementById('recBtn').addEventListener('click', toggleRecording);
+
+document.getElementById('monitorToggle').addEventListener('change', (e)=>{
+  if (monitorGain) monitorGain.gain.setTargetAtTime(e.target.checked?1:0, audioCtx.currentTime, 0.05);
+});
+
+document.querySelectorAll('.strip').forEach(strip=>{
+  strip.addEventListener('click', ()=>{
+    if (!isRunning){
+      applyPreset(strip.dataset.preset);
+      return;
+    }
+    applyPreset(strip.dataset.preset);
+  });
+});
+// allow preset preview before mic starts too
+currentPreset = 'original';
+
+document.getElementById('fineTune').addEventListener('input', (e)=>{
+  fineTune = parseFloat(e.target.value);
+  document.getElementById('fineTuneVal').textContent = fineTune.toFixed(1);
+  applyPreset(currentPreset);
+});
+
+if ('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  });
+}
+</script>
+</body>
+</html>
