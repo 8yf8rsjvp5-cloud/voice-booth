@@ -296,7 +296,18 @@
       <button id="ttsSpeakBtn">▶ Озвучить</button>
       <button id="ttsStopBtn" style="background:var(--panel-raised); color:var(--text); border:1px solid var(--line);">⏹ Стоп</button>
     </div>
+
+    <div style="margin-top:14px;">
+      <div class="fader-row">
+        <span class="scope-label" style="min-width:70px;">Скорость</span>
+        <input type="range" id="ttsRate" min="0.5" max="1.3" step="0.05" value="0.9">
+        <span class="fader-val" id="ttsRateVal">0.9×</span>
+      </div>
+      <div class="hint" style="margin:4px 0 0;">Медленнее часто = чётче. Если слова "съезжаются" — сбавь скорость.</div>
+    </div>
+
     <div class="warn" id="ttsWarn">Список голосов и их качество зависят от телефона/браузера — на iPhone это голоса Siri, на Android — голоса Google. Скачать результат файлом браузер не позволяет, только прослушать.</div>
+    <div class="banner" id="ttsLangWarning" style="display:none; margin-top:10px;"></div>
   </div>
 
   <div class="panel">
@@ -642,6 +653,18 @@ function populateVoiceList(){
     const tag = g === 'female' ? '♀' : g === 'male' ? '♂' : '•';
     return `<option value="${idx}">${tag} ${v.name} (${v.lang})</option>`;
   }).join('');
+
+  const hasRussian = availableVoices.some(v => v.lang.toLowerCase().startsWith('ru'));
+  const langWarn = document.getElementById('ttsLangWarning');
+  if (!hasRussian){
+    langWarn.style.display = 'block';
+    langWarn.innerHTML = '⚠ На этом устройстве не найден русский голос для озвучки — текст будет читаться английским (или другим) движком "по буквам", отсюда нечёткость и неправильное произношение. Это чинится в настройках телефона, не в приложении:<br><br>' +
+      '<strong>Android:</strong> Настройки → Система → Языки и ввод → Синтез речи (Text-to-speech) → выбери движок Google → значок настроек рядом → установи русский язык.<br><br>' +
+      '<strong>iPhone/iPad:</strong> Настройки → Специальные возможности → Контент речи → Голоса → Русский → скачай голос.<br><br>' +
+      'После установки обнови эту страницу.';
+  } else {
+    langWarn.style.display = 'none';
+  }
 }
 
 if ('speechSynthesis' in window){
@@ -654,10 +677,15 @@ if ('speechSynthesis' in window){
 
 function pickVoiceForGender(gender){
   const match = availableVoices.find(v => guessGender(v) === gender && v.lang.toLowerCase().startsWith('ru'))
+    || availableVoices.find(v => v.lang.toLowerCase().startsWith('ru')) // any ru voice beats a foreign gender-matched one
     || availableVoices.find(v => guessGender(v) === gender)
     || null;
   return match;
 }
+
+document.getElementById('ttsRate').addEventListener('input', (e) => {
+  document.getElementById('ttsRateVal').textContent = parseFloat(e.target.value).toFixed(2) + '×';
+});
 
 document.getElementById('ttsMaleBtn').addEventListener('click', () => {
   ttsGenderBias = 'male';
@@ -683,7 +711,7 @@ document.getElementById('ttsSpeakBtn').addEventListener('click', () => {
   } else {
     utter.lang = 'ru-RU';
   }
-  utter.rate = 1.0;
+  utter.rate = parseFloat(document.getElementById('ttsRate').value) || 0.9;
   utter.pitch = 1.0;
   speechSynthesis.speak(utter);
 });
