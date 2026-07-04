@@ -278,6 +278,28 @@
   </div>
 
   <div class="panel">
+    <h3>Озвучить текст голосом</h3>
+    <div class="hint">
+      Это отдельная функция: не меняет твой голос, а произносит написанный текст встроенным в телефон/браузер голосом — на современных Android и iPhone это качественные нейросетевые голоса, куда естественнее живого питч-шифтера выше.
+    </div>
+    <textarea id="ttsText" rows="3" placeholder="Напиши текст, который нужно озвучить…"
+      style="width:100%; background:var(--panel-raised); border:1px solid var(--line); border-radius:9px; color:var(--text); padding:12px; font-family:'Inter',sans-serif; font-size:14px; resize:vertical; margin-bottom:12px;"></textarea>
+
+    <div class="mic-row" style="margin-top:0;">
+      <select id="ttsVoiceSelect" style="flex:1; min-width:180px; background:var(--panel-raised); border:1px solid var(--line); color:var(--text); border-radius:9px; padding:10px 12px; font-size:13.5px;">
+        <option value="">Загружаю доступные голоса…</option>
+      </select>
+    </div>
+    <div class="mic-row">
+      <button id="ttsMaleBtn" style="background:var(--panel-raised); color:var(--text); border:1px solid var(--line);">♂ Мужской (авто)</button>
+      <button id="ttsFemaleBtn" style="background:var(--panel-raised); color:var(--text); border:1px solid var(--line);">♀ Женский (авто)</button>
+      <button id="ttsSpeakBtn">▶ Озвучить</button>
+      <button id="ttsStopBtn" style="background:var(--panel-raised); color:var(--text); border:1px solid var(--line);">⏹ Стоп</button>
+    </div>
+    <div class="warn" id="ttsWarn">Список голосов и их качество зависят от телефона/браузера — на iPhone это голоса Siri, на Android — голоса Google. Скачать результат файлом браузер не позволяет, только прослушать.</div>
+  </div>
+
+  <div class="panel">
     <h3>Точная настройка тона</h3>
     <div class="hint">Двигай, если пресет нужно чуть подкрутить под себя (в полутонах).</div>
     <div class="fader-row">
@@ -314,14 +336,14 @@
 </div>
 
 <script>
-let audioCtx, micStream, sourceNode, scriptNode, formantFilter, monitorGain, analyser, streamDest;
+let audioCtx, micStream, sourceNode, scriptNode, formantFilter, smoothFilter, monitorGain, analyser, streamDest;
 let currentPreset = 'original';
 let fineTune = 0;
 let isRunning = false;
 
 // pitch-shifter state (shared with the onaudioprocess callback below)
 let ringBuffer, ringLen, writeIndex, readIndex, pitchRatio;
-const GRAIN = 1024;
+const GRAIN = 2048;
 
 const PRESETS = {
   original: { semitones: 0,   filterFreq: null, filterGain: 0, wobble:false },
@@ -356,34 +378,48 @@ async function initAudio(){
 
   // Pitch shifter implemented with ScriptProcessorNode (no external module
   // loading required — works reliably from local files and http/https alike).
-  ringLen = 8192;
+  // Uses 4-tap overlap-add (instead of 2-tap) for a smoother, calmer result
+  // with less audible "chopping"/tremolo artifacting.
+  ringLen = 16384;
   ringBuffer = new Float32Array(ringLen);
   writeIndex = 0;
   readIndex = 0;
   pitchRatio = 1.0;
 
+  const TAPS = 4;
+  const quarter = GRAIN / TAPS;
+
   scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
   scriptNode.onaudioprocess = function(e){
     const input = e.inputBuffer.getChannelData(0);
     const output = e.outputBuffer.getChannelData(0);
-    const half = GRAIN / 2;
     for (let i = 0; i < input.length; i++){
       ringBuffer[writeIndex] = input[i];
       writeIndex = (writeIndex + 1) % ringLen;
 
-      const idx1 = readIndex;
-      const idx2 = (readIndex + half) % ringLen;
-      const pos = idx1 % GRAIN;
-      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * pos) / GRAIN);
-      const s1 = ringBuffer[Math.floor(idx1) % ringLen];
-      const s2 = ringBuffer[Math.floor(idx2) % ringLen];
-      output[i] = s1 * w + s2 * (1 - w);
+      let sample = 0;
+      let wSum = 0;
+      for (let t = 0; t < TAPS; t++){
+        const idx = (readIndex + t * quarter) % ringLen;
+        const pos = idx % GRAIN;
+        const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * pos) / GRAIN);
+        sample += ringBuffer[Math.floor(idx) % ringLen] * w;
+        wSum += w;
+      }
+      output[i] = wSum > 0.0001 ? sample / wSum : 0;
 
       readIndex += pitchRatio;
       if (readIndex >= ringLen) readIndex -= ringLen;
       if (readIndex < 0) readIndex += ringLen;
     }
   };
+
+  // Gentle smoothing low-pass to soften residual grain artifacts —
+  // this is the main knob for "calmer, less jittery" sound.
+  smoothFilter = audioCtx.createBiquadFilter();
+  smoothFilter.type = 'lowpass';
+  smoothFilter.frequency.value = 7500;
+  smoothFilter.Q.value = 0.7;
 
   formantFilter = audioCtx.createBiquadFilter();
   formantFilter.type = 'peaking';
@@ -400,7 +436,8 @@ async function initAudio(){
   analyser.fftSize = 1024;
 
   sourceNode.connect(scriptNode);
-  scriptNode.connect(formantFilter);
+  scriptNode.connect(smoothFilter);
+  smoothFilter.connect(formantFilter);
   formantFilter.connect(analyser);
   analyser.connect(monitorGain);
   monitorGain.connect(audioCtx.destination);
@@ -571,6 +608,89 @@ if ('serviceWorker' in navigator){
     navigator.serviceWorker.register('sw.js').catch(()=>{});
   });
 }
+
+// ===== Text-to-speech (uses the OS/browser's built-in voices) =====
+let availableVoices = [];
+let ttsGenderBias = null; // 'male' | 'female' | null
+
+const FEMALE_HINTS = ['female','женск','milena','irina','anna','katya','екатерина','мария','wavenet-a','wavenet-c','wavenet-e','zira','samantha','victoria','alena','алёна','алена'];
+const MALE_HINTS = ['male','мужск','yuri','юрий','pavel','павел','dmitri','дмитрий','maxim','wavenet-b','wavenet-d','david','daniel','alex '];
+
+function guessGender(voice){
+  const n = (voice.name + ' ' + (voice.voiceURI||'')).toLowerCase();
+  if (FEMALE_HINTS.some(h => n.includes(h))) return 'female';
+  if (MALE_HINTS.some(h => n.includes(h))) return 'male';
+  return 'unknown';
+}
+
+function populateVoiceList(){
+  availableVoices = window.speechSynthesis ? speechSynthesis.getVoices() : [];
+  const select = document.getElementById('ttsVoiceSelect');
+  if (!availableVoices.length){
+    select.innerHTML = '<option value="">Голоса не найдены — попробуй перезагрузить страницу</option>';
+    return;
+  }
+  // Russian-language voices first, then the rest.
+  const sorted = [...availableVoices].sort((a,b) => {
+    const aRu = a.lang.toLowerCase().startsWith('ru') ? 0 : 1;
+    const bRu = b.lang.toLowerCase().startsWith('ru') ? 0 : 1;
+    return aRu - bRu;
+  });
+  select.innerHTML = sorted.map((v, i) => {
+    const idx = availableVoices.indexOf(v);
+    const g = guessGender(v);
+    const tag = g === 'female' ? '♀' : g === 'male' ? '♂' : '•';
+    return `<option value="${idx}">${tag} ${v.name} (${v.lang})</option>`;
+  }).join('');
+}
+
+if ('speechSynthesis' in window){
+  populateVoiceList();
+  speechSynthesis.onvoiceschanged = populateVoiceList;
+} else {
+  document.getElementById('ttsWarn').textContent = 'Этот браузер не поддерживает озвучку текста (Web Speech API недоступен).';
+  document.getElementById('ttsSpeakBtn').disabled = true;
+}
+
+function pickVoiceForGender(gender){
+  const match = availableVoices.find(v => guessGender(v) === gender && v.lang.toLowerCase().startsWith('ru'))
+    || availableVoices.find(v => guessGender(v) === gender)
+    || null;
+  return match;
+}
+
+document.getElementById('ttsMaleBtn').addEventListener('click', () => {
+  ttsGenderBias = 'male';
+  const v = pickVoiceForGender('male');
+  if (v) document.getElementById('ttsVoiceSelect').value = availableVoices.indexOf(v);
+});
+document.getElementById('ttsFemaleBtn').addEventListener('click', () => {
+  ttsGenderBias = 'female';
+  const v = pickVoiceForGender('female');
+  if (v) document.getElementById('ttsVoiceSelect').value = availableVoices.indexOf(v);
+});
+
+document.getElementById('ttsSpeakBtn').addEventListener('click', () => {
+  const text = document.getElementById('ttsText').value.trim();
+  if (!text){ return; }
+  if (!('speechSynthesis' in window)) return;
+  speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  const sel = document.getElementById('ttsVoiceSelect').value;
+  if (sel !== '' && availableVoices[sel]) {
+    utter.voice = availableVoices[sel];
+    utter.lang = availableVoices[sel].lang;
+  } else {
+    utter.lang = 'ru-RU';
+  }
+  utter.rate = 1.0;
+  utter.pitch = 1.0;
+  speechSynthesis.speak(utter);
+});
+
+document.getElementById('ttsStopBtn').addEventListener('click', () => {
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+});
 </script>
 </body>
 </html>
