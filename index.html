@@ -356,6 +356,15 @@ let isRunning = false;
 let ringBuffer, ringLen, writeIndex, readIndex, pitchRatio;
 const GRAIN = 2048;
 
+// Precomputed Hann window lookup table — computed once, reused every sample.
+// Calling Math.cos() per sample per tap was the actual cause of the audio
+// stuttering/"bad internet" sound: at 8 taps that's ~350,000 cos() calls per
+// second, which is too heavy for real-time processing on a phone CPU.
+const WINDOW_LUT = new Float32Array(GRAIN);
+for (let k = 0; k < GRAIN; k++){
+  WINDOW_LUT[k] = 0.5 - 0.5 * Math.cos((2 * Math.PI * k) / GRAIN);
+}
+
 const PRESETS = {
   original: { semitones: 0,   f1:null, g1:0, f2:null, g2:0 },
   male:     { semitones: -4,  f1:350,  g1:5, f2:2200, g2:-4 },
@@ -389,18 +398,19 @@ async function initAudio(){
 
   // Pitch shifter implemented with ScriptProcessorNode (no external module
   // loading required — works reliably from local files and http/https alike).
-  // Uses 8-tap overlap-add (up from 4) plus a larger processing buffer for a
-  // calmer, less "jittery" result with far fewer audible grain artifacts.
+  // 4-tap overlap-add using the precomputed window table above — smooth
+  // enough to avoid the old "chopping" sound, light enough not to overload
+  // a phone CPU (which was causing the stuttering/"bad internet" artifact).
   ringLen = 16384;
   ringBuffer = new Float32Array(ringLen);
   writeIndex = 0;
   readIndex = 0;
   pitchRatio = 1.0;
 
-  const TAPS = 8;
+  const TAPS = 4;
   const step = GRAIN / TAPS;
 
-  scriptNode = audioCtx.createScriptProcessor(8192, 1, 1);
+  scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
   scriptNode.onaudioprocess = function(e){
     const input = e.inputBuffer.getChannelData(0);
     const output = e.outputBuffer.getChannelData(0);
@@ -411,10 +421,12 @@ async function initAudio(){
       let sample = 0;
       let wSum = 0;
       for (let t = 0; t < TAPS; t++){
-        const idx = (readIndex + t * step) % ringLen;
-        const pos = idx % GRAIN;
-        const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * pos) / GRAIN);
-        sample += ringBuffer[Math.floor(idx) % ringLen] * w;
+        const idx = readIndex + t * step;
+        const idxFloor = Math.floor(idx);
+        const pos = idxFloor % GRAIN;
+        const w = WINDOW_LUT[pos < 0 ? pos + GRAIN : pos];
+        const bufIdx = idxFloor % ringLen;
+        sample += ringBuffer[bufIdx < 0 ? bufIdx + ringLen : bufIdx] * w;
         wSum += w;
       }
       output[i] = wSum > 0.0001 ? sample / wSum : 0;
@@ -680,6 +692,8 @@ function populateVoiceList(){
   }).join('');
 
   const hasRussian = availableVoices.some(v => v.lang.toLowerCase().startsWith('ru'));
+  const ruVoices = availableVoices.filter(v => v.lang.toLowerCase().startsWith('ru'));
+  const ruGenders = new Set(ruVoices.map(guessGender).filter(g => g !== 'unknown'));
   const langWarn = document.getElementById('ttsLangWarning');
   if (!hasRussian){
     langWarn.style.display = 'block';
@@ -687,6 +701,12 @@ function populateVoiceList(){
       '<strong>Android:</strong> Настройки → Система → Языки и ввод → Синтез речи (Text-to-speech) → выбери движок Google → значок настроек рядом → установи русский язык.<br><br>' +
       '<strong>iPhone/iPad:</strong> Настройки → Специальные возможности → Контент речи → Голоса → Русский → скачай голос.<br><br>' +
       'После установки обнови эту страницу.';
+  } else if (ruVoices.length < 2 || ruGenders.size < 2){
+    langWarn.style.display = 'block';
+    langWarn.innerHTML = `⚠ На этом устройстве найден только ${ruVoices.length === 1 ? '1 русский голос' : ruVoices.length + ' русских голоса, но без явного мужского/женского'}. Кнопки «Мужской/Женский» в этом случае лишь меняют высоту тона одного и того же голоса — а многие современные (нейросетевые) голоса эту настройку попросту игнорируют, поэтому разницы может быть не слышно. Это ограничение голосового движка телефона, а не приложения. Варианты:<br><br>` +
+      '<strong>iPhone:</strong> Настройки → Специальные возможности → Контент речи → Голоса → Русский — обычно там есть и женский (Milena), и мужской (Yuri) голоса на выбор, если оба скачаны.<br>' +
+      '<strong>Android:</strong> обычно даёт только один голос на язык через системный TTS — нескольких дикторов одного языка добавить нельзя.<br><br>' +
+      'Если нужна гарантированная и явная разница между мужским и женским — это можно сделать через облачный сервис синтеза речи (не зависит от голосов телефона), но потребуется завести бесплатный API-ключ у стороннего провайдера. Спроси меня, если хочешь такой вариант.';
   } else {
     langWarn.style.display = 'none';
   }
