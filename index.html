@@ -306,7 +306,7 @@
       <div class="hint" style="margin:4px 0 0;">Медленнее часто = чётче. Если слова "съезжаются" — сбавь скорость.</div>
     </div>
 
-    <div class="warn" id="ttsWarn">Список голосов и их качество зависят от телефона/браузера — на iPhone это голоса Siri, на Android — голоса Google. Скачать результат файлом браузер не позволяет, только прослушать.</div>
+    <div class="warn" id="ttsWarn">Мужской/женский регулируют высоту голоса. Если на телефоне всего один системный русский голос — это единственный способ их различить (два разных диктора появятся, только если в системе установлено несколько русских голосов). Скачать результат файлом браузер не позволяет, только прослушать.</div>
     <div class="banner" id="ttsLangWarning" style="display:none; margin-top:10px;"></div>
   </div>
 
@@ -347,7 +347,7 @@
 </div>
 
 <script>
-let audioCtx, micStream, sourceNode, scriptNode, formantFilter, smoothFilter, monitorGain, analyser, streamDest;
+let audioCtx, micStream, sourceNode, scriptNode, formantFilter, formantFilter2, smoothFilter, deHarshFilter, monitorGain, analyser, streamDest;
 let currentPreset = 'original';
 let fineTune = 0;
 let isRunning = false;
@@ -357,10 +357,10 @@ let ringBuffer, ringLen, writeIndex, readIndex, pitchRatio;
 const GRAIN = 2048;
 
 const PRESETS = {
-  original: { semitones: 0,   filterFreq: null, filterGain: 0, wobble:false },
-  male:     { semitones: -5,  filterFreq: 500,  filterGain: 4, wobble:false },
-  female:   { semitones: 6,   filterFreq: 2500, filterGain: 4, wobble:false },
-  anon:     { semitones: -3,  filterFreq: 1200, filterGain: -6, wobble:true }
+  original: { semitones: 0,   f1:null, g1:0, f2:null, g2:0 },
+  male:     { semitones: -4,  f1:350,  g1:5, f2:2200, g2:-4 },
+  female:   { semitones: 4,   f1:900,  g1:3, f2:2600, g2:3  },
+  anon:     { semitones: -2,  f1:700,  g1:-3, f2:1800, g2:-3 }
 };
 
 function semitonesToRatio(semi){ return Math.pow(2, semi/12); }
@@ -389,18 +389,18 @@ async function initAudio(){
 
   // Pitch shifter implemented with ScriptProcessorNode (no external module
   // loading required — works reliably from local files and http/https alike).
-  // Uses 4-tap overlap-add (instead of 2-tap) for a smoother, calmer result
-  // with less audible "chopping"/tremolo artifacting.
+  // Uses 8-tap overlap-add (up from 4) plus a larger processing buffer for a
+  // calmer, less "jittery" result with far fewer audible grain artifacts.
   ringLen = 16384;
   ringBuffer = new Float32Array(ringLen);
   writeIndex = 0;
   readIndex = 0;
   pitchRatio = 1.0;
 
-  const TAPS = 4;
-  const quarter = GRAIN / TAPS;
+  const TAPS = 8;
+  const step = GRAIN / TAPS;
 
-  scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  scriptNode = audioCtx.createScriptProcessor(8192, 1, 1);
   scriptNode.onaudioprocess = function(e){
     const input = e.inputBuffer.getChannelData(0);
     const output = e.outputBuffer.getChannelData(0);
@@ -411,7 +411,7 @@ async function initAudio(){
       let sample = 0;
       let wSum = 0;
       for (let t = 0; t < TAPS; t++){
-        const idx = (readIndex + t * quarter) % ringLen;
+        const idx = (readIndex + t * step) % ringLen;
         const pos = idx % GRAIN;
         const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * pos) / GRAIN);
         sample += ringBuffer[Math.floor(idx) % ringLen] * w;
@@ -425,18 +425,34 @@ async function initAudio(){
     }
   };
 
-  // Gentle smoothing low-pass to soften residual grain artifacts —
-  // this is the main knob for "calmer, less jittery" sound.
+  // Smoothing low-pass — softens residual grain artifacts (the main knob
+  // for "calmer, less harsh" sound).
   smoothFilter = audioCtx.createBiquadFilter();
   smoothFilter.type = 'lowpass';
-  smoothFilter.frequency.value = 7500;
-  smoothFilter.Q.value = 0.7;
+  smoothFilter.frequency.value = 6500;
+  smoothFilter.Q.value = 0.6;
 
+  // De-harshener — granular pitch-shifting tends to add a metallic/ringing
+  // edge around 4-6 kHz; this gently pulls it back regardless of preset.
+  deHarshFilter = audioCtx.createBiquadFilter();
+  deHarshFilter.type = 'peaking';
+  deHarshFilter.frequency.value = 5000;
+  deHarshFilter.Q.value = 1.1;
+  deHarshFilter.gain.value = -6;
+
+  // Two formant-coloring bands (instead of one) — gives male/female presets
+  // a rounder, more natural timbre instead of a flat "pitched up/down" sound.
   formantFilter = audioCtx.createBiquadFilter();
   formantFilter.type = 'peaking';
   formantFilter.frequency.value = 1000;
   formantFilter.Q.value = 0.9;
   formantFilter.gain.value = 0;
+
+  formantFilter2 = audioCtx.createBiquadFilter();
+  formantFilter2.type = 'peaking';
+  formantFilter2.frequency.value = 2000;
+  formantFilter2.Q.value = 0.9;
+  formantFilter2.gain.value = 0;
 
   monitorGain = audioCtx.createGain();
   monitorGain.gain.value = 0; // off by default (avoid feedback)
@@ -448,8 +464,10 @@ async function initAudio(){
 
   sourceNode.connect(scriptNode);
   scriptNode.connect(smoothFilter);
-  smoothFilter.connect(formantFilter);
-  formantFilter.connect(analyser);
+  smoothFilter.connect(deHarshFilter);
+  deHarshFilter.connect(formantFilter);
+  formantFilter.connect(formantFilter2);
+  formantFilter2.connect(analyser);
   analyser.connect(monitorGain);
   monitorGain.connect(audioCtx.destination);
   analyser.connect(streamDest);
@@ -503,12 +521,19 @@ function applyPreset(name){
   const totalSemi = p.semitones + fineTune;
   pitchRatio = semitonesToRatio(totalSemi);
 
-  if (formantFilter){
-    if (p.filterFreq){
-      formantFilter.frequency.setTargetAtTime(p.filterFreq, audioCtx.currentTime, 0.05);
-      formantFilter.gain.setTargetAtTime(p.filterGain, audioCtx.currentTime, 0.05);
+  if (formantFilter && formantFilter2){
+    const t = audioCtx.currentTime;
+    if (p.f1){
+      formantFilter.frequency.setTargetAtTime(p.f1, t, 0.05);
+      formantFilter.gain.setTargetAtTime(p.g1, t, 0.05);
     } else {
-      formantFilter.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+      formantFilter.gain.setTargetAtTime(0, t, 0.05);
+    }
+    if (p.f2){
+      formantFilter2.frequency.setTargetAtTime(p.f2, t, 0.05);
+      formantFilter2.gain.setTargetAtTime(p.g2, t, 0.05);
+    } else {
+      formantFilter2.gain.setTargetAtTime(0, t, 0.05);
     }
   }
 
@@ -691,11 +716,25 @@ document.getElementById('ttsMaleBtn').addEventListener('click', () => {
   ttsGenderBias = 'male';
   const v = pickVoiceForGender('male');
   if (v) document.getElementById('ttsVoiceSelect').value = availableVoices.indexOf(v);
+  highlightGenderButtons();
 });
 document.getElementById('ttsFemaleBtn').addEventListener('click', () => {
   ttsGenderBias = 'female';
   const v = pickVoiceForGender('female');
   if (v) document.getElementById('ttsVoiceSelect').value = availableVoices.indexOf(v);
+  highlightGenderButtons();
+});
+
+function highlightGenderButtons(){
+  document.getElementById('ttsMaleBtn').style.borderColor = ttsGenderBias === 'male' ? 'var(--teal)' : 'var(--line)';
+  document.getElementById('ttsFemaleBtn').style.borderColor = ttsGenderBias === 'female' ? 'var(--teal)' : 'var(--line)';
+}
+
+document.getElementById('ttsVoiceSelect').addEventListener('change', () => {
+  // Manually picking a voice from the list clears the male/female pitch bias
+  // so it doesn't fight with a voice the person chose on purpose.
+  ttsGenderBias = null;
+  highlightGenderButtons();
 });
 
 document.getElementById('ttsSpeakBtn').addEventListener('click', () => {
@@ -712,7 +751,9 @@ document.getElementById('ttsSpeakBtn').addEventListener('click', () => {
     utter.lang = 'ru-RU';
   }
   utter.rate = parseFloat(document.getElementById('ttsRate').value) || 0.9;
-  utter.pitch = 1.0;
+  // Pitch bias is what makes male/female audibly different even when the
+  // device only has a single Russian system voice to work with.
+  utter.pitch = ttsGenderBias === 'male' ? 0.75 : ttsGenderBias === 'female' ? 1.35 : 1.0;
   speechSynthesis.speak(utter);
 });
 
