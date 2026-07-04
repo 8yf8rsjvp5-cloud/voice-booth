@@ -347,23 +347,12 @@
 </div>
 
 <script>
-let audioCtx, micStream, sourceNode, scriptNode, formantFilter, formantFilter2, smoothFilter, deHarshFilter, monitorGain, analyser, streamDest;
+let audioCtx, micStream, sourceNode, pitchNode, formantFilter, formantFilter2, smoothFilter, deHarshFilter, warmthFilter, monitorGain, analyser, streamDest;
 let currentPreset = 'original';
 let fineTune = 0;
 let isRunning = false;
 
-// pitch-shifter state (shared with the onaudioprocess callback below)
-let ringBuffer, ringLen, writeIndex, readIndex, pitchRatio;
 const GRAIN = 2048;
-
-// Precomputed Hann window lookup table — computed once, reused every sample.
-// Calling Math.cos() per sample per tap was the actual cause of the audio
-// stuttering/"bad internet" sound: at 8 taps that's ~350,000 cos() calls per
-// second, which is too heavy for real-time processing on a phone CPU.
-const WINDOW_LUT = new Float32Array(GRAIN);
-for (let k = 0; k < GRAIN; k++){
-  WINDOW_LUT[k] = 0.5 - 0.5 * Math.cos((2 * Math.PI * k) / GRAIN);
-}
 
 const PRESETS = {
   original: { semitones: 0,   f1:null, g1:0, f2:null, g2:0 },
@@ -390,70 +379,105 @@ async function initAudio(){
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === 'suspended') await audioCtx.resume();
 
+  if (!audioCtx.audioWorklet){
+    throw new Error('Этот браузер не поддерживает AudioWorklet (нужен для плавной обработки звука). Попробуй обновить браузер или использовать Chrome/Safari свежей версии.');
+  }
+
   micStream = await navigator.mediaDevices.getUserMedia({audio:{
     echoCancellation:true, noiseSuppression:true, autoGainControl:true
   }});
 
   sourceNode = audioCtx.createMediaStreamSource(micStream);
 
-  // Pitch shifter implemented with ScriptProcessorNode (no external module
-  // loading required — works reliably from local files and http/https alike).
-  // 4-tap overlap-add using the precomputed window table above — smooth
-  // enough to avoid the old "chopping" sound, light enough not to overload
-  // a phone CPU (which was causing the stuttering/"bad internet" artifact).
-  ringLen = 16384;
-  ringBuffer = new Float32Array(ringLen);
-  writeIndex = 0;
-  readIndex = 0;
-  pitchRatio = 1.0;
-
-  const TAPS = 4;
-  const step = GRAIN / TAPS;
-
-  scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
-  scriptNode.onaudioprocess = function(e){
-    const input = e.inputBuffer.getChannelData(0);
-    const output = e.outputBuffer.getChannelData(0);
-    for (let i = 0; i < input.length; i++){
-      ringBuffer[writeIndex] = input[i];
-      writeIndex = (writeIndex + 1) % ringLen;
-
-      let sample = 0;
-      let wSum = 0;
-      for (let t = 0; t < TAPS; t++){
-        const idx = readIndex + t * step;
-        const idxFloor = Math.floor(idx);
-        const pos = idxFloor % GRAIN;
-        const w = WINDOW_LUT[pos < 0 ? pos + GRAIN : pos];
-        const bufIdx = idxFloor % ringLen;
-        sample += ringBuffer[bufIdx < 0 ? bufIdx + ringLen : bufIdx] * w;
-        wSum += w;
+  // Pitch shifter runs on AudioWorklet — a dedicated, high-priority audio
+  // thread separate from the page's main thread. This is the real fix for
+  // the stuttering: the previous ScriptProcessorNode ran on the same thread
+  // as page rendering, so anything the page was doing (drawing the scope,
+  // scrolling, etc.) could starve the audio callback and cause glitches.
+  // AudioWorklet doesn't have that problem. (We use it now that the app is
+  // served over https — the file:// module-loading restriction that made us
+  // avoid it earlier no longer applies.)
+  const workletCode = `
+    class PitchProcessor extends AudioWorkletProcessor {
+      constructor(options){
+        super();
+        this.GRAIN = options.processorOptions.grain;
+        this.ringLen = 16384;
+        this.ring = new Float32Array(this.ringLen);
+        this.writeIndex = 0;
+        this.readIndex = 0;
+        this.pitchRatio = 1.0;
+        this.TAPS = 4;
+        this.step = this.GRAIN / this.TAPS;
+        this.win = new Float32Array(this.GRAIN);
+        for (let k = 0; k < this.GRAIN; k++){
+          this.win[k] = 0.5 - 0.5 * Math.cos((2 * Math.PI * k) / this.GRAIN);
+        }
+        this.port.onmessage = (e) => {
+          if (e.data.pitch !== undefined) this.pitchRatio = e.data.pitch;
+        };
       }
-      output[i] = wSum > 0.0001 ? sample / wSum : 0;
+      process(inputs, outputs){
+        const input = inputs[0][0];
+        const output = outputs[0][0];
+        if (!input || !output) return true;
+        const ring = this.ring, ringLen = this.ringLen, win = this.win;
+        const GRAIN = this.GRAIN, TAPS = this.TAPS, step = this.step;
+        for (let i = 0; i < input.length; i++){
+          ring[this.writeIndex] = input[i];
+          this.writeIndex = (this.writeIndex + 1) % ringLen;
 
-      readIndex += pitchRatio;
-      if (readIndex >= ringLen) readIndex -= ringLen;
-      if (readIndex < 0) readIndex += ringLen;
+          let sample = 0, wSum = 0;
+          for (let t = 0; t < TAPS; t++){
+            const idx = this.readIndex + t * step;
+            let idxFloor = Math.floor(idx);
+            let pos = idxFloor % GRAIN;
+            if (pos < 0) pos += GRAIN;
+            let bufIdx = idxFloor % ringLen;
+            if (bufIdx < 0) bufIdx += ringLen;
+            const w = win[pos];
+            sample += ring[bufIdx] * w;
+            wSum += w;
+          }
+          output[i] = wSum > 0.0001 ? sample / wSum : 0;
+
+          this.readIndex += this.pitchRatio;
+          if (this.readIndex >= ringLen) this.readIndex -= ringLen;
+          if (this.readIndex < 0) this.readIndex += ringLen;
+        }
+        return true;
+      }
     }
-  };
+    registerProcessor('pitch-processor', PitchProcessor);
+  `;
+  const blob = new Blob([workletCode], {type: 'application/javascript'});
+  const workletUrl = URL.createObjectURL(blob);
+  await audioCtx.audioWorklet.addModule(workletUrl);
+  pitchNode = new AudioWorkletNode(audioCtx, 'pitch-processor', {
+    processorOptions: { grain: GRAIN }
+  });
 
-  // Smoothing low-pass — softens residual grain artifacts (the main knob
-  // for "calmer, less harsh" sound).
+  // Calmer, warmer filter chain — softer de-harshening, gentle low-end
+  // warmth so the result feels closer to a natural voice than a "device".
   smoothFilter = audioCtx.createBiquadFilter();
   smoothFilter.type = 'lowpass';
-  smoothFilter.frequency.value = 6500;
+  smoothFilter.frequency.value = 7500;
   smoothFilter.Q.value = 0.6;
 
-  // De-harshener — granular pitch-shifting tends to add a metallic/ringing
-  // edge around 4-6 kHz; this gently pulls it back regardless of preset.
   deHarshFilter = audioCtx.createBiquadFilter();
   deHarshFilter.type = 'peaking';
-  deHarshFilter.frequency.value = 5000;
-  deHarshFilter.Q.value = 1.1;
-  deHarshFilter.gain.value = -6;
+  deHarshFilter.frequency.value = 4500;
+  deHarshFilter.Q.value = 1.0;
+  deHarshFilter.gain.value = -5;
 
-  // Two formant-coloring bands (instead of one) — gives male/female presets
-  // a rounder, more natural timbre instead of a flat "pitched up/down" sound.
+  warmthFilter = audioCtx.createBiquadFilter();
+  warmthFilter.type = 'peaking';
+  warmthFilter.frequency.value = 220;
+  warmthFilter.Q.value = 0.8;
+  warmthFilter.gain.value = 2.5;
+
+  // Two formant-coloring bands — gives male/female presets a rounder, more
+  // natural timbre instead of a flat "pitched up/down" sound.
   formantFilter = audioCtx.createBiquadFilter();
   formantFilter.type = 'peaking';
   formantFilter.frequency.value = 1000;
@@ -474,8 +498,9 @@ async function initAudio(){
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 1024;
 
-  sourceNode.connect(scriptNode);
-  scriptNode.connect(smoothFilter);
+  sourceNode.connect(pitchNode);
+  pitchNode.connect(warmthFilter);
+  warmthFilter.connect(smoothFilter);
   smoothFilter.connect(deHarshFilter);
   deHarshFilter.connect(formantFilter);
   formantFilter.connect(formantFilter2);
@@ -490,6 +515,7 @@ async function initAudio(){
 }
 
 let mediaRecorder, recordedChunks = [];
+let recordingHistory = []; // { url, name, ts } — kept in memory for the whole session
 
 function toggleRecording(){
   const recBtn = document.getElementById('recBtn');
@@ -505,17 +531,12 @@ function toggleRecording(){
       const ext = finalType.includes('mp4') ? 'm4a' : finalType.includes('ogg') ? 'ogg' : finalType.includes('aac') ? 'aac' : 'webm';
       const blob = new Blob(recordedChunks, {type: finalType});
       const url = URL.createObjectURL(blob);
-      const box = document.getElementById('recResult');
-      box.innerHTML = '';
-      const audio = document.createElement('audio');
-      audio.controls = true;
-      audio.src = url;
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'голос-' + currentPreset + '.' + ext;
-      link.textContent = '⬇ Скачать и отправить как голосовое';
-      box.appendChild(audio);
-      box.appendChild(link);
+      const now = new Date();
+      const timeLabel = now.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      const presetLabels = {original:'свой', male:'мужской', female:'женский', anon:'анонимный'};
+      const name = 'голос-' + currentPreset + '-' + now.getTime() + '.' + ext;
+      recordingHistory.unshift({ url, name, timeLabel, presetLabel: presetLabels[currentPreset] || currentPreset });
+      renderRecordingHistory();
     };
     mediaRecorder.start();
     recBtn.textContent = '⏹ Остановить запись';
@@ -527,11 +548,53 @@ function toggleRecording(){
   }
 }
 
+function renderRecordingHistory(){
+  const box = document.getElementById('recResult');
+  if (!recordingHistory.length){
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = '<div class="scope-label" style="margin:14px 0 8px;">История записей (' + recordingHistory.length + ') — хранится, пока открыта вкладка</div>';
+  recordingHistory.forEach((rec, i) => {
+    const entry = document.createElement('div');
+    entry.style.cssText = 'background:var(--panel-raised); border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px;';
+    const label = document.createElement('div');
+    label.style.cssText = 'font-family:IBM Plex Mono,monospace; font-size:11.5px; color:var(--text-muted); margin-bottom:6px; display:flex; justify-content:space-between;';
+    label.innerHTML = `<span>${rec.timeLabel} · ${rec.presetLabel}</span>`;
+    const audio = document.createElement('audio');
+    audio.controls = true;
+    audio.src = rec.url;
+    audio.style.width = '100%';
+    audio.style.marginBottom = '6px';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; gap:8px; align-items:center;';
+    const link = document.createElement('a');
+    link.href = rec.url;
+    link.download = rec.name;
+    link.textContent = '⬇ Скачать';
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '✕ Удалить';
+    delBtn.style.cssText = 'background:transparent; color:var(--text-muted); border:1px solid var(--line); padding:6px 10px; font-size:12px;';
+    delBtn.addEventListener('click', () => {
+      URL.revokeObjectURL(rec.url);
+      recordingHistory.splice(i, 1);
+      renderRecordingHistory();
+    });
+    row.appendChild(link);
+    row.appendChild(delBtn);
+    entry.appendChild(label);
+    entry.appendChild(audio);
+    entry.appendChild(row);
+    box.appendChild(entry);
+  });
+}
+
 function applyPreset(name){
   currentPreset = name;
   const p = PRESETS[name];
   const totalSemi = p.semitones + fineTune;
-  pitchRatio = semitonesToRatio(totalSemi);
+  const ratio = semitonesToRatio(totalSemi);
+  if (pitchNode) pitchNode.port.postMessage({pitch: ratio});
 
   if (formantFilter && formantFilter2){
     const t = audioCtx.currentTime;
