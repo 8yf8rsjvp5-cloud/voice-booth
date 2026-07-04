@@ -417,11 +417,15 @@ function toggleRecording(){
   const recBtn = document.getElementById('recBtn');
   if (!mediaRecorder || mediaRecorder.state === 'inactive'){
     recordedChunks = [];
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    const candidates = ['audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg'];
+    const mimeType = candidates.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
     mediaRecorder = mimeType ? new MediaRecorder(streamDest.stream, {mimeType}) : new MediaRecorder(streamDest.stream);
+    recordedChunks.mimeUsed = mediaRecorder.mimeType || mimeType || 'audio/webm';
     mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
     mediaRecorder.onstop = () => {
-      const blob = new Blob(recordedChunks, {type: mediaRecorder.mimeType || 'audio/webm'});
+      const finalType = mediaRecorder.mimeType || recordedChunks.mimeUsed || 'audio/webm';
+      const ext = finalType.includes('mp4') ? 'm4a' : finalType.includes('ogg') ? 'ogg' : finalType.includes('aac') ? 'aac' : 'webm';
+      const blob = new Blob(recordedChunks, {type: finalType});
       const url = URL.createObjectURL(blob);
       const box = document.getElementById('recResult');
       box.innerHTML = '';
@@ -430,7 +434,7 @@ function toggleRecording(){
       audio.src = url;
       const link = document.createElement('a');
       link.href = url;
-      link.download = 'голос-' + currentPreset + '.webm';
+      link.download = 'голос-' + currentPreset + '.' + ext;
       link.textContent = '⬇ Скачать и отправить как голосовое';
       box.appendChild(audio);
       box.appendChild(link);
